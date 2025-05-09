@@ -155,7 +155,9 @@ def main():
     tabs = st.tabs([
         "📊 PDF → Excel", 
         "🔗 Fusion PDF", 
-        "✂️ Fractionnement PDF"
+        "✂️ Fractionnement PDF",
+        "📄 PDF → Word", 
+        "📝 Word → PDF"
     ])
 
     # Onglet 1: PDF vers Excel
@@ -441,6 +443,109 @@ def main():
                         st.success("✅ Fractionnement terminé avec succès!")
                     except Exception as e:
                         st.error(f"❌ Une erreur est survenue lors du fractionnement: {str(e)}")
+
+
+    
+    # Onglet 1: PDF vers Word
+    with tabs[3]:
+        st.markdown("<div class='tab-title'>📄 Conversion PDF vers Word</div>", unsafe_allow_html=True)
+        st.markdown("Transformez vos fichiers PDF en documents Word modifiables")
+        
+        pdf_file = st.file_uploader("Choisissez un fichier PDF", type=["pdf"], 
+                                  key="pdf_to_word", help="Format PDF uniquement")
+        
+        if pdf_file is not None:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info(f"📂 Fichier chargé: {pdf_file.name}")
+            with col2:
+                convert_button = st.button("✨ Convertir en Word", key="convert_pdf_to_word")
+            
+            if convert_button:
+                with st.spinner("🔍 Conversion en cours... Un instant!"):
+                    try:
+                        # Sauvegarde temporaire du fichier PDF
+                        temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+                        temp_pdf.write(pdf_file.read())
+                        temp_pdf.close()
+                        
+                        # Chemin du fichier Word de sortie
+                        output_docx = os.path.splitext(temp_pdf.name)[0] + '.docx'
+                        
+                        # Conversion PDF en Word
+                        cv = Converter(temp_pdf.name)
+                        cv.convert(output_docx)
+                        cv.close()
+                        
+                        # Téléchargement du fichier converti
+                        with open(output_docx, "rb") as file:
+                            output_filename = os.path.splitext(pdf_file.name)[0] + '.docx'
+                            docx_bytes = file.read()
+                            st.download_button(
+                                label="📥 Télécharger le fichier Word",
+                                data=docx_bytes,
+                                file_name=output_filename,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            )
+                        
+                        # Nettoyage des fichiers temporaires
+                        os.unlink(temp_pdf.name)
+                        os.unlink(output_docx)
+                        
+                        st.success("✅ Conversion terminée avec succès!")
+                    except Exception as e:
+                        st.error(f"❌ Une erreur est survenue: {str(e)}")
+
+    # Onglet 2: Word vers PDF
+    with tabs[4]:
+        st.markdown("<div class='tab-title'>📝 Conversion Word vers PDF</div>", unsafe_allow_html=True)
+        st.markdown("Convertissez vos documents Word en fichiers PDF professionnels")
+        
+        docx_file = st.file_uploader("Choisissez un fichier Word", type=["docx"], 
+                                   key="word_to_pdf", help="Format .docx uniquement")
+        
+        if docx_file is not None:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info(f"📂 Fichier chargé: {docx_file.name}")
+            with col2:
+                convert_button = st.button("✨ Convertir en PDF", key="convert_word_to_pdf")
+            
+            if convert_button:
+                with st.spinner("🔍 Conversion en cours... Un instant!"):
+                    try:
+                        # Sauvegarde temporaire du fichier Word
+                        temp_docx = tempfile.NamedTemporaryFile(delete=False, suffix='.docx')
+                        temp_docx.write(docx_file.read())
+                        temp_docx.close()
+                        
+                        # Chemin du fichier PDF de sortie
+                        output_pdf = os.path.splitext(temp_docx.name)[0] + '.pdf'
+                        
+                        # Conversion Word en PDF
+                        convert(temp_docx.name, output_pdf)
+                        
+                        # Téléchargement du fichier converti
+                        with open(output_pdf, "rb") as file:
+                            output_filename = os.path.splitext(docx_file.name)[0] + '.pdf'
+                            pdf_bytes = file.read()
+                            st.download_button(
+                                label="📥 Télécharger le fichier PDF",
+                                data=pdf_bytes,
+                                file_name=output_filename,
+                                mime="application/pdf"
+                            )
+                        
+                        # Nettoyage des fichiers temporaires
+                        os.unlink(temp_docx.name)
+                        os.unlink(output_pdf)
+                        
+                        st.success("✅ Conversion terminée avec succès!")
+                    except Exception as e:
+                        st.error(f"❌ Une erreur est survenue: {str(e)}")
+
+
+
 
     # Pied de page
     st.markdown("---")
