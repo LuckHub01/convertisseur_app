@@ -4,6 +4,7 @@ import tempfile
 from PyPDF2 import PdfReader, PdfWriter
 import pandas as pd
 from docx import Document
+from pdf2docx import Converter
 import io
 import zipfile
 import pdfplumber
