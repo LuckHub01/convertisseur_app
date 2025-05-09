@@ -1,13 +1,15 @@
 import streamlit as st
 import os
 import tempfile
+import io
+import zipfile
 from PyPDF2 import PdfReader, PdfWriter
 import pandas as pd
 from docx import Document
 from pdf2docx import Converter
-import io
-import zipfile
 import pdfplumber
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
 
 # Configuration de la page
 st.set_page_config(
@@ -21,64 +23,49 @@ st.set_page_config(
 st.markdown("""
 <style>
     .stApp {
-        background-color: #060e2b;
+        background-color: #f0f2f6;
+        color: #333;
     }
     .header {
-        color: white;
+        color: #2c3e50;
         text-align: center;
         padding: 1rem;
+        font-size: 2.5rem;
+        margin-bottom: 1rem;
     }
     .stButton>button {
         background-color: #4CAF50;
         color: white;
+        border: none;
         border-radius: 5px;
         padding: 10px 24px;
         font-weight: bold;
         transition: all 0.3s;
+        width: 100%;
     }
     .stButton>button:hover {
         background-color: #45a049;
         transform: scale(1.02);
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
     }
     .stDownloadButton>button {
         background-color: #2196F3;
         color: white;
         border-radius: 5px;
+        width: 100%;
     }
     .stDownloadButton>button:hover {
         background-color: #0b7dda;
     }
-    .stSuccess {
-        background-color: #e8f5e9;
-        border-left: 5px solid #4CAF50;
-        padding: 1rem;
+    .stFileUploader>div>div>div>div {
+        color: #2c3e50;
     }
-    .stInfo {
-        background-color: #e3f2fd;
-        border-left: 5px solid #2196F3;
-        padding: 1rem;
-    }
-    .stWarning {
-        background-color: #fff8e1;
-        border-left: 5px solid #FFC107;
-        padding: 1rem;
-    }
-    .stError {
-        background-color: #ffebee;
-        border-left: 5px solid #F44336;
-        padding: 1rem;
-    }
-    .robot-img {
-        display: block;
-        margin-left: auto;
-        margin-right: auto;
-        width: 200px;
-        margin-bottom: 1rem;
-    }
-    .tab-title {
-        font-size: 1.2rem;
-        font-weight: bold;
-        margin-bottom: 1rem;
+    .tab-content {
+        padding: 1.5rem;
+        background-color: white;
+        border-radius: 10px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        margin-bottom: 1.5rem;
     }
     .footer {
         text-align: center;
@@ -87,472 +74,361 @@ st.markdown("""
         padding-top: 1rem;
         border-top: 1px solid #eee;
     }
+    .conversion-info {
+        background-color: #e8f5e9;
+        padding: 1rem;
+        border-radius: 5px;
+        margin-bottom: 1rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+def create_pdf_from_docx(docx_path, output_pdf_path):
+    """Convertit un DOCX en PDF en utilisant reportlab"""
+    doc = Document(docx_path)
+    c = canvas.Canvas(output_pdf_path, pagesize=letter)
+    width, height = letter
+    
+    y_position = height - 40
+    for para in doc.paragraphs:
+        if y_position < 40:
+            c.showPage()
+            y_position = height - 40
+        
+        text = para.text
+        lines = text.split('\n')
+        for line in lines:
+            c.setFont("Helvetica", 12)
+            c.drawString(40, y_position, line)
+            y_position -= 15
+    
+    c.save()
+
 def clean_column_names(columns):
-    """Nettoie les noms de colonnes et gère les doublons"""
+    """Nettoie les noms de colonnes"""
     cleaned = []
     seen = {}
-    
     for i, col in enumerate(columns):
-        # Nettoyage de base
         col = str(col).strip()
         if not col:
-            col = f"Colonne_{i}"
-        
-        # Gestion des doublons
+            col = f"Colonne_{i+1}"
         if col in seen:
             seen[col] += 1
             col = f"{col}_{seen[col]}"
         else:
             seen[col] = 1
-        
         cleaned.append(col)
-    
     return cleaned
 
-def detect_best_separator(lines, sample_size=5):
-    """Détecte le meilleur séparateur de colonnes"""
-    separators = ['\t', '  ', '|', ';', ',']
-    best_sep = None
-    best_score = 0
-    
-    for sep in separators:
-        col_counts = []
-        for line in lines[:min(sample_size, len(lines))]:
-            parts = line.split(sep)
-            col_counts.append(len(parts))
+def extract_tables_from_pdf(pdf_path, all_pages=False, page_number=1, strategy="auto", space_threshold=2):
+    """Extrait les tables d'un PDF"""
+    all_dfs = []
+    with pdfplumber.open(pdf_path) as pdf:
+        pages = pdf.pages if all_pages else [pdf.pages[page_number-1]]
         
-        if len(set(col_counts)) == 1 and col_counts[0] > best_score:
-            best_score = col_counts[0]
-            best_sep = sep
+        for page in pages:
+            try:
+                if strategy in ["auto", "tables"]:
+                    tables = page.extract_tables({
+                        "vertical_strategy": "text",
+                        "horizontal_strategy": "text",
+                        "explicit_vertical_lines": [],
+                        "explicit_horizontal_lines": [],
+                        "snap_tolerance": 3,
+                        "join_tolerance": 3,
+                        "edge_min_length": 3,
+                        "min_words_vertical": space_threshold
+                    })
+                    
+                    for table in tables:
+                        if len(table) > 1:
+                            headers = clean_column_names(table[0])
+                            df = pd.DataFrame(table[1:], columns=headers)
+                            all_dfs.append(df)
+                
+                if (strategy in ["auto", "text"] and not all_dfs):
+                    text = page.extract_text()
+                    if text:
+                        lines = [line.strip() for line in text.split('\n') if line.strip()]
+                        if len(lines) > 1:
+                            headers = clean_column_names(lines[0].split())
+                            data = [line.split() for line in lines[1:]]
+                            df = pd.DataFrame(data, columns=headers)
+                            all_dfs.append(df)
+            
+            except Exception as e:
+                st.warning(f"Erreur sur la page {pages.index(page)+1}: {str(e)}")
     
-    return best_sep
-
-def looks_like_header(header_row, data_row):
-    """Détermine si la première ligne ressemble à des en-têtes"""
-    if len(header_row) != len(data_row):
-        return False
-    
-    # Vérifie si les éléments de header_row semblent être des titres
-    header_indicators = sum(
-        1 for h, d in zip(header_row, data_row) 
-        if (h.isupper() or ' ' not in h) and not d.replace('.','').isdigit()
-    )
-    
-    return header_indicators / len(header_row) > 0.5
+    return all_dfs
 
 def main():
-    # En-tête avec image centrale
     st.markdown("<h1 class='header'>🔄 Super Convertisseur de Fichiers</h1>", unsafe_allow_html=True)
     st.markdown("""
-    <div style='text-align: center; margin-bottom: 30px; font-size: 1.1rem;'>
-        Transformez vos fichiers en un clin d'œil!<br>PDF ↔ Excel • Fusion • Fractionnement
+    <div style='text-align: center; margin-bottom: 2rem; font-size: 1.1rem; color: #555;'>
+        Transformez vos fichiers entre différents formats en quelques clics
     </div>
     """, unsafe_allow_html=True)
 
-    # Création des onglets
     tabs = st.tabs([
+        "📄 PDF → Word", 
+        "📝 Word → PDF", 
         "📊 PDF → Excel", 
         "🔗 Fusion PDF", 
-        "✂️ Fractionnement PDF",
-        "📄 PDF → Word", 
-        "📝 Word → PDF"
+        "✂️ Fractionnement PDF"
     ])
 
-    # Onglet 1: PDF vers Excel
+    # PDF to Word
     with tabs[0]:
-        st.markdown("<div class='tab-title'>📊 Conversion PDF vers Excel</div>", unsafe_allow_html=True)
-        st.markdown("Extrayez les tableaux de vos PDF vers Excel en un clic")
+        st.markdown("<div class='tab-content'>", unsafe_allow_html=True)
+        st.markdown("### Conversion PDF vers Word")
+        st.markdown("Transformez vos fichiers PDF en documents Word modifiables")
         
-        pdf_file = st.file_uploader("Choisissez un fichier PDF", type=["pdf"], 
-                                  key="pdf_to_excel", help="Format PDF uniquement")
+        pdf_file = st.file_uploader("Téléversez un fichier PDF", type=["pdf"], key="pdf_to_word")
         
-        if pdf_file is not None:
+        if pdf_file:
+            st.markdown(f"<div class='conversion-info'>Fichier sélectionné : <strong>{pdf_file.name}</strong></div>", unsafe_allow_html=True)
+            
+            if st.button("Convertir en Word", key="btn_pdf_to_word"):
+                with st.spinner("Conversion en cours..."):
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_pdf:
+                            tmp_pdf.write(pdf_file.read())
+                            tmp_pdf_path = tmp_pdf.name
+                        
+                        output_docx = tempfile.NamedTemporaryFile(delete=False, suffix='.docx').name
+                        
+                        cv = Converter(tmp_pdf_path)
+                        cv.convert(output_docx)
+                        cv.close()
+                        
+                        with open(output_docx, "rb") as f:
+                            st.download_button(
+                                "Télécharger le document Word",
+                                f,
+                                file_name=f"{os.path.splitext(pdf_file.name)[0]}.docx",
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            )
+                        
+                        st.success("Conversion réussie !")
+                    except Exception as e:
+                        st.error(f"Erreur : {str(e)}")
+                    finally:
+                        for path in [tmp_pdf_path, output_docx]:
+                            if os.path.exists(path):
+                                os.unlink(path)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Word to PDF
+    with tabs[1]:
+        st.markdown("<div class='tab-content'>", unsafe_allow_html=True)
+        st.markdown("### Conversion Word vers PDF")
+        st.markdown("Convertissez vos documents Word en fichiers PDF")
+        
+        docx_file = st.file_uploader("Téléversez un fichier Word", type=["docx"], key="word_to_pdf")
+        
+        if docx_file:
+            st.markdown(f"<div class='conversion-info'>Fichier sélectionné : <strong>{docx_file.name}</strong></div>", unsafe_allow_html=True)
+            
+            if st.button("Convertir en PDF", key="btn_word_to_pdf"):
+                with st.spinner("Conversion en cours..."):
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_docx:
+                            tmp_docx.write(docx_file.read())
+                            tmp_docx_path = tmp_docx.name
+                        
+                        output_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf').name
+                        
+                        create_pdf_from_docx(tmp_docx_path, output_pdf)
+                        
+                        with open(output_pdf, "rb") as f:
+                            st.download_button(
+                                "Télécharger le PDF",
+                                f,
+                                file_name=f"{os.path.splitext(docx_file.name)[0]}.pdf",
+                                mime="application/pdf"
+                            )
+                        
+                        st.success("Conversion réussie !")
+                    except Exception as e:
+                        st.error(f"Erreur : {str(e)}")
+                    finally:
+                        for path in [tmp_docx_path, output_pdf]:
+                            if os.path.exists(path):
+                                os.unlink(path)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # PDF to Excel
+    with tabs[2]:
+        st.markdown("<div class='tab-content'>", unsafe_allow_html=True)
+        st.markdown("### Conversion PDF vers Excel")
+        st.markdown("Extrayez les tableaux de vos PDF vers Excel")
+        
+        pdf_file = st.file_uploader("Téléversez un fichier PDF", type=["pdf"], key="pdf_to_excel")
+        
+        if pdf_file:
+            st.markdown(f"<div class='conversion-info'>Fichier sélectionné : <strong>{pdf_file.name}</strong></div>", unsafe_allow_html=True)
+            
             col1, col2 = st.columns(2)
             with col1:
-                st.info(f"📂 Fichier chargé: {pdf_file.name}")
-                page_number = st.number_input("Numéro de page à extraire", min_value=1, value=1)
-                all_pages = st.checkbox("Convertir toutes les pages", value=False)
+                page_num = st.number_input("Numéro de page", min_value=1, value=1)
+                all_pages = st.checkbox("Toutes les pages")
             with col2:
-                # Définir une valeur par défaut pour space_threshold
-                space_threshold = 2  # Valeur par défaut
-                
-                advanced_options = st.checkbox("⚙️ Options avancées")
-                if advanced_options:
-                    table_strategy = st.selectbox(
-                        "Stratégie d'extraction",
-                        ["Auto (recommandé)", "Tableaux uniquement", "Texte brut"]
-                    )
-                    space_threshold = st.slider("Seuil d'espacement pour les colonnes", 1, 10, space_threshold)
-                
-                convert_button = st.button("✨ Convertir en Excel", key="convert_pdf_to_excel")
+                strategy = st.selectbox("Stratégie", ["auto", "tables", "text"])
+                space_thresh = st.slider("Seuil d'espacement", 1, 10, 2)
             
-            if convert_button:
-                with st.spinner("🔍 Analyse du PDF en cours..."):
+            if st.button("Convertir en Excel", key="btn_pdf_to_excel"):
+                with st.spinner("Extraction des données..."):
                     try:
-                        # Sauvegarde temporaire du fichier PDF
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_pdf:
-                            temp_pdf.write(pdf_file.read())
-                            temp_path = temp_pdf.name
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_pdf:
+                            tmp_pdf.write(pdf_file.read())
+                            tmp_pdf_path = tmp_pdf.name
                         
-                        # Initialisation
-                        all_dfs = []
+                        tables = extract_tables_from_pdf(
+                            tmp_pdf_path, 
+                            all_pages=all_pages,
+                            page_number=page_num,
+                            strategy=strategy,
+                            space_threshold=space_thresh
+                        )
                         
-                        with pdfplumber.open(temp_path) as pdf:
-                            pages_to_process = pdf.pages if all_pages else [pdf.pages[page_number-1]]
-                            
-                            for page in pages_to_process:
-                                try:
-                                    # Paramètres d'extraction par défaut
-                                    table_settings = {
-                                        "vertical_strategy": "text", 
-                                        "horizontal_strategy": "text",
-                                        "explicit_vertical_lines": [],
-                                        "explicit_horizontal_lines": [],
-                                        "snap_tolerance": 3,
-                                        "join_tolerance": 3,
-                                        "edge_min_length": 3,
-                                        "min_words_vertical": space_threshold
-                                    }
-                                    
-                                    # Stratégie d'extraction
-                                    if not advanced_options or table_strategy in ["Auto (recommandé)", "Tableaux uniquement"]:
-                                        tables = page.extract_tables(table_settings)
-                                        
-                                        for table in tables:
-                                            if len(table) > 1:  # Au moins une ligne d'en-tête + données
-                                                # Nettoyage des noms de colonnes
-                                                headers = clean_column_names(table[0])
-                                                df = pd.DataFrame(table[1:], columns=headers)
-                                                all_dfs.append(df)
-                                    
-                                    # Si mode auto ou texte brut et pas de tableaux trouvés
-                                    if (not advanced_options or table_strategy in ["Auto (recommandé)", "Texte brut"]) and len(all_dfs) == 0:
-                                        text = page.extract_text()
-                                        if text:
-                                            # Traitement intelligent du texte
-                                            lines = [line.strip() for line in text.split('\n') if line.strip()]
-                                            
-                                            # Détection des colonnes
-                                            separator = detect_best_separator(lines)
-                                            data = []
-                                            
-                                            for line in lines:
-                                                if separator:
-                                                    row = [cell.strip() for cell in line.split(separator)]
-                                                else:
-                                                    row = line.split(maxsplit=3)  # Limite le split pour les données simples
-                                                data.append(row)
-                                            
-                                            if len(data) > 1:
-                                                # Détection automatique des en-têtes
-                                                if looks_like_header(data[0], data[1]):
-                                                    headers = clean_column_names(data[0])
-                                                    df = pd.DataFrame(data[1:], columns=headers)
-                                                else:
-                                                    df = pd.DataFrame(data)
-                                                    df.columns = clean_column_names(df.columns)
-                                                all_dfs.append(df)
-                                
-                                except Exception as e:
-                                    st.warning(f"⚠️ Erreur sur la page {pages_to_process.index(page)+1}: {str(e)}")
-                                    continue
-                        
-                        # Création du fichier Excel
-                        if all_dfs:
+                        if tables:
                             output = io.BytesIO()
                             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                                for i, df in enumerate(all_dfs):
-                                    sheet_name = f"Page_{(i//3)+1}_Table{(i%3)+1}" if all_pages else f"Données_{i+1}"
-                                    df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
-                            
-                            # Téléchargement
-                            output_filename = f"{os.path.splitext(pdf_file.name)[0]}_converted.xlsx"
-                            st.success(f"✅ Conversion réussie! {len(all_dfs)} tableaux extraits.")
+                                for i, df in enumerate(tables):
+                                    df.to_excel(writer, sheet_name=f"Table_{i+1}", index=False)
                             
                             st.download_button(
-                                label="📥 Télécharger le fichier Excel",
-                                data=output.getvalue(),
-                                file_name=output_filename,
+                                "Télécharger le fichier Excel",
+                                output.getvalue(),
+                                file_name=f"{os.path.splitext(pdf_file.name)[0]}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             )
                             
-                            # Aperçu
-                            st.subheader("👀 Aperçu des données")
-                            st.dataframe(all_dfs[0].head())
+                            st.dataframe(tables[0].head())
+                            st.success(f"{len(tables)} tableaux extraits avec succès !")
                         else:
-                            st.error("❌ Aucune donnée exploitable n'a été trouvée dans le PDF.")
-                    
+                            st.warning("Aucun tableau détecté dans le PDF")
                     except Exception as e:
-                        st.error(f"❌ Erreur majeure lors de la conversion : {str(e)}")
+                        st.error(f"Erreur : {str(e)}")
                     finally:
-                        # Nettoyage
-                        if os.path.exists(temp_path):
-                            os.unlink(temp_path)
+                        if os.path.exists(tmp_pdf_path):
+                            os.unlink(tmp_pdf_path)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    # Onglet 2: Fusion PDF
-    with tabs[1]:
-        st.markdown("<div class='tab-title'>🔗 Fusion de fichiers PDF</div>", unsafe_allow_html=True)
-        st.markdown("Combinez plusieurs fichiers PDF en un seul document")
+    # Fusion PDF
+    with tabs[3]:
+        st.markdown("<div class='tab-content'>", unsafe_allow_html=True)
+        st.markdown("### Fusion de fichiers PDF")
+        st.markdown("Combinez plusieurs PDF en un seul document")
         
-        uploaded_pdfs = st.file_uploader("Choisissez plusieurs fichiers PDF", 
-                                       type=["pdf"], 
-                                       accept_multiple_files=True, 
-                                       key="merge_pdfs",
-                                       help="Sélectionnez plusieurs fichiers PDF à fusionner")
+        pdf_files = st.file_uploader("Téléversez plusieurs fichiers PDF", 
+                                   type=["pdf"], 
+                                   accept_multiple_files=True,
+                                   key="merge_pdfs")
         
-        if uploaded_pdfs:
-            pdf_names = [pdf.name for pdf in uploaded_pdfs]
-            st.info(f"📂 Fichiers chargés ({len(uploaded_pdfs)}): {', '.join(pdf_names)}")
+        if pdf_files and len(pdf_files) > 1:
+            st.markdown(f"<div class='conversion-info'>{len(pdf_files)} fichiers sélectionnés</div>", unsafe_allow_html=True)
             
-            if st.button("✨ Fusionner les PDF", key="merge_pdf_button"):
-                with st.spinner("🔗 Fusion en cours..."):
+            if st.button("Fusionner les PDF", key="btn_merge_pdfs"):
+                with st.spinner("Fusion en cours..."):
                     try:
                         merger = PdfWriter()
-                        
-                        # Ajout de chaque PDF au merger
-                        for pdf_file in uploaded_pdfs:
+                        for pdf_file in pdf_files:
                             pdf_file.seek(0)
                             pdf = PdfReader(pdf_file)
                             for page in pdf.pages:
                                 merger.add_page(page)
                         
-                        # Création du PDF fusionné en mémoire
-                        merged_pdf = io.BytesIO()
-                        merger.write(merged_pdf)
-                        merged_pdf.seek(0)
+                        output = io.BytesIO()
+                        merger.write(output)
+                        output.seek(0)
                         
-                        # Téléchargement du fichier fusionné
                         st.download_button(
-                            label="📥 Télécharger le PDF fusionné",
-                            data=merged_pdf,
-                            file_name="fichiers_fusionnes.pdf",
+                            "Télécharger le PDF fusionné",
+                            output,
+                            file_name="fusion.pdf",
                             mime="application/pdf"
                         )
-                        
-                        st.success("✅ Fusion terminée avec succès!")
+                        st.success("Fusion réussie !")
                     except Exception as e:
-                        st.error(f"❌ Une erreur est survenue lors de la fusion: {str(e)}")
+                        st.error(f"Erreur : {str(e)}")
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    # Onglet 3: Fractionnement PDF
-    with tabs[2]:
-        st.markdown("<div class='tab-title'>✂️ Fractionnement de fichier PDF</div>", unsafe_allow_html=True)
-        st.markdown("Extrayez des pages spécifiques de vos fichiers PDF")
+    # Fractionnement PDF
+    with tabs[4]:
+        st.markdown("<div class='tab-content'>", unsafe_allow_html=True)
+        st.markdown("### Fractionnement de PDF")
+        st.markdown("Extrayez des pages spécifiques de vos PDF")
         
-        pdf_file = st.file_uploader("Choisissez un fichier PDF", 
-                                  type=["pdf"], 
-                                  key="split_pdf",
-                                  help="Sélectionnez un PDF à fractionner")
+        pdf_file = st.file_uploader("Téléversez un fichier PDF", type=["pdf"], key="split_pdf")
         
-        if pdf_file is not None:
-            # Lecture du PDF pour obtenir le nombre de pages
-            pdf_file.seek(0)
+        if pdf_file:
             pdf = PdfReader(pdf_file)
             num_pages = len(pdf.pages)
+            st.markdown(f"<div class='conversion-info'>Fichier sélectionné : <strong>{pdf_file.name}</strong> ({num_pages} pages)</div>", unsafe_allow_html=True)
             
-            st.info(f"📂 Fichier chargé: {pdf_file.name} ({num_pages} pages)")
+            split_option = st.radio("Options", ["Toutes les pages", "Plage de pages"])
             
-            col1, col2 = st.columns(2)
-            with col1:
-                split_option = st.radio(
-                    "Option de fractionnement",
-                    ["Toutes les pages individuellement", "Plage de pages spécifique"],
-                    index=1
-                )
+            if split_option == "Plage de pages":
+                page_range = st.text_input("Entrez la plage (ex: 1-3,5,7-9)", help="Ex: '1-3' pour les pages 1 à 3, '1,3,5' pour les pages 1,3 et 5")
             
-            if split_option == "Plage de pages spécifique":
-                with col2:
-                    page_range = st.text_input(
-                        "Entrez la plage de pages (ex: 1-3,5,7-9)",
-                        placeholder="1-3,5,7-9",
-                        help="Exemples: '1-3' (pages 1 à 3), '1,3,5' (pages 1,3,5), '1-3,5-7' (pages 1-3 et 5-7)"
-                    )
-            
-            if st.button("✨ Fractionner le PDF", key="split_pdf_button"):
-                with st.spinner("✂️ Fractionnement en cours..."):
+            if st.button("Fractionner le PDF", key="btn_split_pdf"):
+                with st.spinner("Traitement en cours..."):
                     try:
-                        pdf_file.seek(0)
-                        pdf = PdfReader(pdf_file)
-                        
-                        if split_option == "Toutes les pages individuellement":
-                            # Création d'un ZIP pour contenir tous les PDF individuels
+                        if split_option == "Toutes les pages":
                             zip_buffer = io.BytesIO()
                             with zipfile.ZipFile(zip_buffer, 'w') as zf:
-                                for i in range(len(pdf.pages)):
+                                for i in range(num_pages):
                                     writer = PdfWriter()
                                     writer.add_page(pdf.pages[i])
-                                    
-                                    # Création du PDF individuel en mémoire
-                                    output = io.BytesIO()
-                                    writer.write(output)
-                                    output.seek(0)
-                                    
-                                    # Ajout au ZIP
-                                    zf.writestr(f"page_{i+1}.pdf", output.getvalue())
+                                    page_bytes = io.BytesIO()
+                                    writer.write(page_bytes)
+                                    page_bytes.seek(0)
+                                    zf.writestr(f"page_{i+1}.pdf", page_bytes.getvalue())
                             
-                            # Téléchargement du ZIP
-                            zip_buffer.seek(0)
                             st.download_button(
-                                label="📥 Télécharger toutes les pages (ZIP)",
-                                data=zip_buffer,
-                                file_name="pages_individuelles.zip",
+                                "Télécharger toutes les pages (ZIP)",
+                                zip_buffer.getvalue(),
+                                file_name="pages_separees.zip",
                                 mime="application/zip"
                             )
-                            
-                        else:  # Plage de pages spécifique
+                        else:
                             if not page_range:
-                                st.error("❌ Veuillez entrer une plage de pages valide.")
-                                return
-                            
-                            # Parsing de la plage de pages
-                            pages_to_extract = []
-                            ranges = page_range.split(',')
-                            for r in ranges:
-                                if '-' in r:
-                                    start, end = map(int, r.split('-'))
-                                    pages_to_extract.extend(range(start, end + 1))
-                                else:
-                                    pages_to_extract.append(int(r))
-                            
-                            # Vérification que les pages sont dans la plage valide
-                            pages_to_extract = [p for p in pages_to_extract if 1 <= p <= len(pdf.pages)]
-                            
-                            if not pages_to_extract:
-                                st.error("❌ Aucune page valide spécifiée")
-                                return
-                            
-                            # Création du PDF extrait
-                            writer = PdfWriter()
-                            for page_num in pages_to_extract:
-                                writer.add_page(pdf.pages[page_num - 1])
-                            
-                            # Création du PDF en mémoire
-                            output = io.BytesIO()
-                            writer.write(output)
-                            output.seek(0)
-                            
-                            # Téléchargement du PDF extrait
-                            st.download_button(
-                                label="📥 Télécharger les pages extraites",
-                                data=output,
-                                file_name=f"pages_extraites_{page_range}.pdf",
-                                mime="application/pdf"
-                            )
+                                st.error("Veuillez entrer une plage valide")
+                            else:
+                                pages = []
+                                for part in page_range.split(','):
+                                    if '-' in part:
+                                        start, end = map(int, part.split('-'))
+                                        pages.extend(range(start-1, end))
+                                    else:
+                                        pages.append(int(part)-1)
+                                
+                                writer = PdfWriter()
+                                for page_num in sorted(set(pages)):
+                                    if 0 <= page_num < num_pages:
+                                        writer.add_page(pdf.pages[page_num])
+                                
+                                output = io.BytesIO()
+                                writer.write(output)
+                                output.seek(0)
+                                
+                                st.download_button(
+                                    "Télécharger les pages sélectionnées",
+                                    output,
+                                    file_name="pages_selectionnees.pdf",
+                                    mime="application/pdf"
+                                )
                         
-                        st.success("✅ Fractionnement terminé avec succès!")
+                        st.success("Fractionnement réussi !")
                     except Exception as e:
-                        st.error(f"❌ Une erreur est survenue lors du fractionnement: {str(e)}")
-
-
-    
-    # Onglet 1: PDF vers Word
-    with tabs[3]:
-        st.markdown("<div class='tab-title'>📄 Conversion PDF vers Word</div>", unsafe_allow_html=True)
-        st.markdown("Transformez vos fichiers PDF en documents Word modifiables")
-        
-        pdf_file = st.file_uploader("Choisissez un fichier PDF", type=["pdf"], 
-                                  key="pdf_to_word", help="Format PDF uniquement")
-        
-        if pdf_file is not None:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.info(f"📂 Fichier chargé: {pdf_file.name}")
-            with col2:
-                convert_button = st.button("✨ Convertir en Word", key="convert_pdf_to_word")
-            
-            if convert_button:
-                with st.spinner("🔍 Conversion en cours... Un instant!"):
-                    try:
-                        # Sauvegarde temporaire du fichier PDF
-                        temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
-                        temp_pdf.write(pdf_file.read())
-                        temp_pdf.close()
-                        
-                        # Chemin du fichier Word de sortie
-                        output_docx = os.path.splitext(temp_pdf.name)[0] + '.docx'
-                        
-                        # Conversion PDF en Word
-                        cv = Converter(temp_pdf.name)
-                        cv.convert(output_docx)
-                        cv.close()
-                        
-                        # Téléchargement du fichier converti
-                        with open(output_docx, "rb") as file:
-                            output_filename = os.path.splitext(pdf_file.name)[0] + '.docx'
-                            docx_bytes = file.read()
-                            st.download_button(
-                                label="📥 Télécharger le fichier Word",
-                                data=docx_bytes,
-                                file_name=output_filename,
-                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                            )
-                        
-                        # Nettoyage des fichiers temporaires
-                        os.unlink(temp_pdf.name)
-                        os.unlink(output_docx)
-                        
-                        st.success("✅ Conversion terminée avec succès!")
-                    except Exception as e:
-                        st.error(f"❌ Une erreur est survenue: {str(e)}")
-
-    # Onglet 2: Word vers PDF
-    with tabs[4]:
-        st.markdown("<div class='tab-title'>📝 Conversion Word vers PDF</div>", unsafe_allow_html=True)
-        st.markdown("Convertissez vos documents Word en fichiers PDF professionnels")
-        
-        docx_file = st.file_uploader("Choisissez un fichier Word", type=["docx"], 
-                                   key="word_to_pdf", help="Format .docx uniquement")
-        
-        if docx_file is not None:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.info(f"📂 Fichier chargé: {docx_file.name}")
-            with col2:
-                convert_button = st.button("✨ Convertir en PDF", key="convert_word_to_pdf")
-            
-            if convert_button:
-                with st.spinner("🔍 Conversion en cours... Un instant!"):
-                    try:
-                        # Sauvegarde temporaire du fichier Word
-                        temp_docx = tempfile.NamedTemporaryFile(delete=False, suffix='.docx')
-                        temp_docx.write(docx_file.read())
-                        temp_docx.close()
-                        
-                        # Chemin du fichier PDF de sortie
-                        output_pdf = os.path.splitext(temp_docx.name)[0] + '.pdf'
-                        
-                        # Conversion Word en PDF
-                        convert(temp_docx.name, output_pdf)
-                        
-                        # Téléchargement du fichier converti
-                        with open(output_pdf, "rb") as file:
-                            output_filename = os.path.splitext(docx_file.name)[0] + '.pdf'
-                            pdf_bytes = file.read()
-                            st.download_button(
-                                label="📥 Télécharger le fichier PDF",
-                                data=pdf_bytes,
-                                file_name=output_filename,
-                                mime="application/pdf"
-                            )
-                        
-                        # Nettoyage des fichiers temporaires
-                        os.unlink(temp_docx.name)
-                        os.unlink(output_pdf)
-                        
-                        st.success("✅ Conversion terminée avec succès!")
-                    except Exception as e:
-                        st.error(f"❌ Une erreur est survenue: {str(e)}")
-
-
-
+                        st.error(f"Erreur : {str(e)}")
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # Pied de page
-    st.markdown("---")
     st.markdown("""
     <div class='footer'>
-        🚀 Application développée avec Streamlit • © 2025 • Version 2.0 • PIAC
+        Application développée avec Streamlit • © 2023 • Version 2.0
     </div>
     """, unsafe_allow_html=True)
 
